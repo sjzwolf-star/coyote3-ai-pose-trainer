@@ -1,0 +1,446 @@
+/**
+ * 姿态检测模块
+ * 使用 MediaPipe Tasks Vision PoseLandmarker
+ * 支持实时摄像头流和图片导入
+ */
+const PoseDetection = {
+  landmarker: null,
+  runningMode: 'IMAGE',
+  cameraStream: null,
+  videoEl: null,
+  canvasEl: null,
+  ctx: null,
+  rafId: null,
+  lastVideoTime: -1,
+  results: null,
+
+  // 回调
+  onPoseResult: null,
+
+  // PoseLandmarker 33个关键点索引
+  // 0: nose, 11-12: shoulders, 13-14: elbows, 15-16: wrists,
+  // 23-24: hips, 25-26: knees, 27-28: ankles
+  KEYPOINT_INDICES: {
+    nose: 0, leftShoulder: 11, rightShoulder: 12,
+    leftElbow: 13, rightElbow: 14, leftWrist: 15, rightWrist: 16,
+    leftHip: 23, rightHip: 24,
+    leftKnee: 25, rightKnee: 26,
+    leftAnkle: 27, rightAnkle: 28,
+  },
+
+  // 骨架连接
+  CONNECTIONS: [
+    [11,12],[11,13],[13,15],[12,14],[14,16], // 上半身
+    [11,23],[12,24],[23,24], // 躯干
+    [23,25],[25,27],[24,26],[26,28], // 下半身
+    [0,11],[0,12], // 头部
+  ],
+
+  // 关节角度计算所需的三元组
+  ANGLE_TRIPLETS: [
+    { name: 'leftElbow',   a: 11, b: 13, c: 15 },
+    { name: 'rightElbow',  a: 12, b: 14, c: 16 },
+    { name: 'leftShoulder',a: 13, b: 11, c: 23 },
+    { name: 'rightShoulder',a:14, b: 12, c: 24 },
+    { name: 'leftHip',     a: 11, b: 23, c: 25 },
+    { name: 'rightHip',    a: 12, b: 24, c: 26 },
+    { name: 'leftKnee',    a: 23, b: 25, c: 27 },
+    { name: 'rightKnee',   a: 24, b: 26, c: 28 },
+  ],
+
+  // ==================== 初始化 ====================
+
+  async init() {
+    if (typeof vision === 'undefined') {
+      throw new Error('MediaPipe Tasks Vision 库未加载，请检查网络连接。');
+    }
+
+    const { PoseLandmarker, FilesetResolver } = vision;
+
+    const filesetResolver = await FilesetResolver.forVisionTasks(
+      'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
+    );
+
+    this.landmarker = await PoseLandmarker.createFromOptions(filesetResolver, {
+      baseOptions: {
+        modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task',
+        delegate: 'CPU', // 手机端先用CPU，后续可改GPU
+      },
+      runningMode: 'IMAGE', // 初始模式，后续切换为VIDEO
+      numPoses: 1,
+      minPoseDetectionConfidence: 0.5,
+      minPosePresenceConfidence: 0.5,
+      minTrackingConfidence: 0.5,
+    });
+
+    return true;
+  },
+
+  // ==================== 摄像头流 ====================
+
+  async startCamera() {
+    if (!this.landmarker) await this.init();
+
+    this.videoEl = document.getElementById('cameraVideo');
+    if (!this.videoEl) throw new Error('找不到视频元素');
+
+    this.cameraStream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: 'user',
+        width: { ideal: 720 },
+        height: { ideal: 1280 },
+      },
+      audio: false,
+    });
+
+    this.videoEl.srcObject = this.cameraStream;
+    await this.videoEl.play();
+
+    // 切换到 VIDEO 模式
+    this.runningMode = 'VIDEO';
+    this.landmarker.setOptions({ runningMode: 'VIDEO' });
+
+    this.canvasEl = document.getElementById('skeleton');
+    this.ctx = this.canvasEl.getContext('2d');
+
+    // 开始检测循环
+    this._detectLoop();
+
+    return true;
+  },
+
+  stopCamera() {
+    if (this.rafId) {
+      cancelAnimationFrame(this.rafId);
+      this.rafId = null;
+    }
+    if (this.cameraStream) {
+      this.cameraStream.getTracks().forEach(t => t.stop());
+      this.cameraStream = null;
+    }
+    if (this.videoEl) {
+      this.videoEl.srcObject = null;
+    }
+    // 清空画布
+    if (this.ctx) {
+      this.ctx.clearRect(0, 0, this.canvasEl.width, this.canvasEl.height);
+    }
+  },
+
+  // ==================== 检测循环 ====================
+
+  _detectLoop() {
+    if (!this.videoEl || !this.landmarker) return;
+
+    const now = performance.now();
+    if (this.videoEl.currentTime !== this.lastVideoTime) {
+      this.lastVideoTime = this.videoEl.currentTime;
+      this.results = this.landmarker.detectForVideo(this.videoEl, now);
+      this._processResult();
+    }
+
+    this.rafId = requestAnimationFrame(() => this._detectLoop());
+  },
+
+  _processResult() {
+    if (!this.results || !this.onPoseResult) return;
+
+    const pose = this.results.landmarks && this.results.landmarks[0];
+
+    if (!pose || pose.length === 0) {
+      this.onPoseResult({
+        detected: false,
+        personCount: 0,
+        landmarks: null,
+        angles: null,
+        matchScore: 0,
+        reason: '未检测到人体',
+      });
+      return;
+    }
+
+    // 计算关节角度
+    const angles = this._calculateAngles(pose);
+
+    // 计算匹配度
+    const matchInfo = this._calculateMatch(pose, angles);
+
+    this.onPoseResult({
+      detected: true,
+      personCount: this.results.landmarks.length,
+      landmarks: pose,
+      angles: angles,
+      matchScore: matchInfo.score,
+      maxDeviation: matchInfo.maxDeviation,
+      maxDeviationName: matchInfo.maxDeviationName,
+      worldLandmarks: this.results.worldLandmarks,
+    });
+  },
+
+  // ==================== 关节角度计算 ====================
+
+  _calculateAngles(landmarks) {
+    const angles = {};
+    for (const triplet of this.ANGLE_TRIPLETS) {
+      const a = landmarks[triplet.a];
+      const b = landmarks[triplet.b];
+      const c = landmarks[triplet.c];
+      if (a && b && c) {
+        angles[triplet.name] = this._angleBetween(a, b, c);
+      }
+    }
+    return angles;
+  },
+
+  _angleBetween(a, b, c) {
+    // 计算从 b 点看 a 和 c 的夹角
+    const rad = Math.atan2(c.y - b.y, c.x - b.x) - Math.atan2(a.y - b.y, a.x - b.x);
+    let deg = Math.abs(rad * 180 / Math.PI);
+    if (deg > 180) deg = 360 - deg;
+    return Math.round(deg);
+  },
+
+  // ==================== 匹配度计算 ====================
+
+  _targetPose: null,
+  _mirrorMode: false,
+
+  setTargetPose(poseData) {
+    this._targetPose = poseData;
+  },
+
+  setMirror(enabled) {
+    this._mirrorMode = enabled;
+  },
+
+  _calculateMatch(landmarks, angles) {
+    if (!this._targetPose || !this._targetPose.angles) {
+      return { score: 0, maxDeviation: 0, maxDeviationName: '' };
+    }
+
+    // 关节角度权重
+    const weights = {
+      leftElbow: 0.15, rightElbow: 0.15,
+      leftShoulder: 0.1, rightShoulder: 0.1,
+      leftHip: 0.15, rightHip: 0.15,
+      leftKnee: 0.1, rightKnee: 0.1,
+    };
+
+    let totalWeight = 0;
+    let totalScore = 0;
+    let maxDeviation = 0;
+    let maxDeviationName = '';
+    let deviations = [];
+
+    for (const [name, targetAngle] of Object.entries(this._targetPose.angles)) {
+      const currentAngle = angles[name];
+      if (currentAngle === undefined) continue;
+
+      const weight = weights[name] || 0.05;
+      const diff = Math.abs(currentAngle - targetAngle);
+      const tolerance = this._targetPose.tolerance ? (this._targetPose.tolerance[name] || 15) : 15;
+
+      // 容差内为满分，超出按比例扣分
+      const score = diff <= tolerance ? 100 : Math.max(0, 100 - (diff - tolerance) * 2);
+
+      totalScore += score * weight;
+      totalWeight += weight;
+
+      if (diff > maxDeviation) {
+        maxDeviation = diff;
+        maxDeviationName = name;
+      }
+
+      deviations.push({ name, diff, score });
+    }
+
+    const finalScore = totalWeight > 0 ? Math.round(totalScore / totalWeight) : 0;
+
+    return { score: finalScore, maxDeviation, maxDeviationName, deviations };
+  },
+
+  // ==================== 镜像处理 ====================
+
+  _mirrorLandmarks(landmarks) {
+    return landmarks.map(lm => ({
+      ...lm,
+      x: 1 - lm.x,
+    }));
+  },
+
+  // ==================== 图片检测 ====================
+
+  async detectImage(imageElement) {
+    if (!this.landmarker) await this.init();
+
+    // 确保是 IMAGE 模式
+    if (this.runningMode !== 'IMAGE') {
+      this.runningMode = 'IMAGE';
+      this.landmarker.setOptions({ runningMode: 'IMAGE' });
+    }
+
+    const results = this.landmarker.detect(imageElement);
+
+    if (!results.landmarks || results.landmarks.length === 0) {
+      return { detected: false, landmarks: null, angles: null };
+    }
+
+    const pose = results.landmarks[0];
+    const angles = this._calculateAngles(pose);
+
+    return {
+      detected: true,
+      landmarks: pose,
+      angles: angles,
+      worldLandmarks: results.worldLandmarks,
+    };
+  },
+
+  // ==================== 绘制骨架 ====================
+
+  drawSkeleton(landmarks, options = {}) {
+    if (!this.ctx || !this.canvasEl) return;
+
+    const w = this.canvasEl.width;
+    const h = this.canvasEl.height;
+
+    // 清除画布
+    this.ctx.clearRect(0, 0, w, h);
+
+    if (!landmarks) return;
+
+    // 绘制目标骨架（半透明青色）
+    if (options.targetLandmarks) {
+      this._drawPose(options.targetLandmarks, w, h, '#40d8d8', 8, 0.3, true);
+    }
+
+    // 绘制实时骨架
+    const color = options.color || (options.matched ? '#54e58a' : (options.deviation ? '#ffb547' : '#8da6ba'));
+    this._drawPose(landmarks, w, h, color, 4, 1.0, false);
+  },
+
+  _drawPose(landmarks, w, h, color, lineWidth, alpha, dashed) {
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.strokeStyle = color;
+    ctx.fillStyle = color;
+    ctx.lineWidth = lineWidth;
+
+    if (dashed) {
+      ctx.setLineDash([8, 6]);
+    } else {
+      ctx.setLineDash([]);
+    }
+
+    // 绘制连接线
+    for (const [start, end] of this.CONNECTIONS) {
+      const s = landmarks[start];
+      const e = landmarks[end];
+      if (s && e) {
+        ctx.beginPath();
+        ctx.moveTo(s.x * w, s.y * h);
+        ctx.lineTo(e.x * w, e.y * h);
+        ctx.stroke();
+      }
+    }
+
+    // 绘制关键点
+    ctx.setLineDash([]);
+    for (let i = 0; i < landmarks.length; i++) {
+      const lm = landmarks[i];
+      if (!lm) continue;
+      // 只绘制主要关键点
+      if (this.KEYPOINT_INDICES) {
+        const isMain = Object.values(this.KEYPOINT_INDICES).includes(i) || i === 0;
+        if (!isMain && i !== 11 && i !== 12 && i !== 13 && i !== 14 && i !== 15 && i !== 16
+            && i !== 23 && i !== 24 && i !== 25 && i !== 26 && i !== 27 && i !== 28) continue;
+      }
+      ctx.beginPath();
+      ctx.arc(lm.x * w, lm.y * h, 5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.restore();
+  },
+
+  // ==================== 预置姿态模板 ====================
+
+  PRESET_POSES: {
+    quadSupport: {
+      name: '四肢支撑',
+      threshold: 85,
+      angles: {
+        leftElbow: 170, rightElbow: 170,
+        leftShoulder: 90, rightShoulder: 90,
+        leftHip: 90, rightHip: 90,
+        leftKnee: 170, rightKnee: 170,
+      },
+      tolerance: { leftElbow: 15, rightElbow: 15, leftShoulder: 20, rightShoulder: 20, leftHip: 15, rightHip: 15, leftKnee: 15, rightKnee: 15 },
+      voicePrompt: '请保持四肢支撑，背部平直',
+    },
+    kneeling: {
+      name: '跪姿保持',
+      threshold: 88,
+      angles: {
+        leftElbow: 160, rightElbow: 160,
+        leftShoulder: 130, rightShoulder: 130,
+        leftHip: 120, rightHip: 120,
+        leftKnee: 90, rightKnee: 90,
+      },
+      tolerance: { leftElbow: 15, rightElbow: 15, leftShoulder: 15, rightShoulder: 15, leftHip: 15, rightHip: 15, leftKnee: 10, rightKnee: 10 },
+      voicePrompt: '跪姿保持，双手前伸',
+    },
+    armsUp: {
+      name: '双臂上举',
+      threshold: 90,
+      angles: {
+        leftElbow: 170, rightElbow: 170,
+        leftShoulder: 160, rightShoulder: 160,
+        leftHip: 170, rightHip: 170,
+        leftKnee: 170, rightKnee: 170,
+      },
+      tolerance: { leftElbow: 10, rightElbow: 10, leftShoulder: 15, rightShoulder: 15, leftHip: 15, rightHip: 15, leftKnee: 15, rightKnee: 15 },
+      voicePrompt: '双臂向上伸展',
+    },
+  },
+
+  getPresetPose(id) {
+    const pose = this.PRESET_POSES[id];
+    if (!pose) return null;
+    return {
+      ...pose,
+      source: 'preset',
+    };
+  },
+
+  // ==================== 取景检查 ====================
+
+  checkFraming(landmarks) {
+    if (!landmarks) return { pass: false, reason: '未检测到人体' };
+
+    // 检查头部和脚踝是否都在画面内
+    const head = landmarks[0];
+    const leftAnkle = landmarks[27];
+    const rightAnkle = landmarks[28];
+
+    if (!head) return { pass: false, reason: '未检测到头部' };
+
+    const hasAnkle = leftAnkle || rightAnkle;
+    if (!hasAnkle) return { pass: false, reason: '未检测到脚踝，可能未全身入镜' };
+
+    // 检查距离（根据关键点间距估算）
+    const nose = landmarks[0];
+    const leftShoulder = landmarks[11];
+    const rightShoulder = landmarks[12];
+
+    if (leftShoulder && rightShoulder) {
+      const shoulderWidth = Math.abs(rightShoulder.x - leftShoulder.x);
+      // 肩膀宽度在画面中的比例，太小说明太远
+      if (shoulderWidth < 0.15) return { pass: false, reason: '距离太远，请靠近' };
+      if (shoulderWidth > 0.6) return { pass: false, reason: '距离太近，请后退' };
+    }
+
+    return { pass: true, reason: '' };
+  },
+};
