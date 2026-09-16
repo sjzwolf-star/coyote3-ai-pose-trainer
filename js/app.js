@@ -145,6 +145,9 @@ const App = {
     // 演示控制
     document.getElementById('btnDeviate').onclick = () => this._toggleDeviation();
 
+    // 前后摄像头切换
+    document.getElementById('btnFlipCamera').onclick = () => this._flipCamera();
+
     // 设备连接
     document.getElementById('btnScanDevice').onclick = () => this._scanAndConnect();
     document.getElementById('btnDisconnect').onclick = () => CoyoteBLE.disconnect();
@@ -265,7 +268,8 @@ const App = {
   async _startCamera() {
     try {
       await PoseDetection.startCamera();
-      this._updateStatusChip('chipCamera', true, '摄像头就绪');
+      this._updateStatusChip('chipCamera', true,
+        PoseDetection.facingMode === 'user' ? '前置就绪' : '后置就绪');
     } catch (e) {
       this._updateStatusChip('chipCamera', false, '摄像头权限被拒');
       alert('无法启动摄像头：' + e.message);
@@ -455,6 +459,25 @@ const App = {
     // 保存事件
     if (this.settings.saveData) {
       Store.saveSafetyEvent(event);
+    }
+  },
+
+  async _flipCamera() {
+    // 摄像头尚未开启时，先按默认前置打开，不执行翻转
+    if (!PoseDetection.cameraStream) {
+      try {
+        await PoseDetection.startCamera();
+      } catch (e) {
+        alert('无法启动摄像头：' + e.message);
+      }
+      return;
+    }
+    try {
+      await PoseDetection.switchCamera();
+      this._updateStatusChip('chipCamera', true,
+        PoseDetection.facingMode === 'user' ? '前置就绪' : '后置就绪');
+    } catch (e) {
+      alert('切换摄像头失败：' + (e.message || '未找到可用的摄像头'));
     }
   },
 

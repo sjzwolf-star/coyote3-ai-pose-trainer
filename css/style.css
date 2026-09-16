@@ -81,7 +81,18 @@ button:active{transform:scale(.97)}
   border:1px solid #274a61;
 }
 .camera canvas{position:relative;z-index:2;width:100%;height:100%;display:block}
-.camera video{position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;opacity:1;transform:scaleX(-1)}
+.camera video{position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;opacity:1}
+.camera video.mirrored{transform:scaleX(-1)}
+/* 前后摄像头切换按钮 */
+.camflip{
+  position:absolute;z-index:3;top:64px;right:12px;
+  width:40px;height:40px;border-radius:50%;padding:0;
+  border:1px solid #31556c;background:rgba(3,13,21,.72);
+  color:var(--cyan);font-size:19px;line-height:1;
+  display:grid;place-items:center;
+}
+.camflip:active{transform:scale(.9)}
+.camflip:disabled{opacity:.5}
 /* 实景上的轻微暗角，保证指标文字可读 */
 .camera:after{
   content:"";position:absolute;inset:0;z-index:1;pointer-events:none;

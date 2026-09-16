@@ -20,6 +20,7 @@ const PoseDetection = {
   _srcH: 0,
   _dpr: 1,
   _mirrored: true,
+  facingMode: 'user', // user=前置（镜像） environment=后置（不镜像）
   _resizeHandler: null,
 
   // 回调
@@ -101,14 +102,7 @@ const PoseDetection = {
     this.videoEl = document.getElementById('cameraVideo');
     if (!this.videoEl) throw new Error('找不到视频元素');
 
-    this.cameraStream = await navigator.mediaDevices.getUserMedia({
-      video: {
-        facingMode: 'user',
-        width: { ideal: 720 },
-        height: { ideal: 1280 },
-      },
-      audio: false,
-    });
+    this.cameraStream = await this._getStream(this.facingMode);
 
     this.videoEl.srcObject = this.cameraStream;
     await this.videoEl.play();
@@ -120,7 +114,7 @@ const PoseDetection = {
     this.canvasEl = document.getElementById('skeleton');
     this.ctx = this.canvasEl.getContext('2d');
 
-    // 显示摄像头实景（CSS 中已做前置镜像）
+    // 显示摄像头实景并应用对应镜像（前置镜像/后置不镜像）
     this.videoEl.style.display = 'block';
 
     // 等待拿到真实分辨率，避免骨架错位
@@ -129,6 +123,7 @@ const PoseDetection = {
     }
     this._srcW = this.videoEl.videoWidth || 720;
     this._srcH = this.videoEl.videoHeight || 1280;
+    this._applyMirror();
 
     // canvas 内部分辨率按实际渲染尺寸 × DPR，保证清晰且与视频 cover 裁剪对齐
     this._trainCanvas = this.canvasEl;
@@ -143,6 +138,76 @@ const PoseDetection = {
     this._detectLoop();
 
     return true;
+  },
+
+  /**
+   * 申请指定朝向的摄像头；exact 失败时降级 ideal，兼容单摄像头设备
+   */
+  async _getStream(mode) {
+    const constraints = (exact) => ({
+      video: {
+        facingMode: exact ? { exact: mode } : mode,
+        width: { ideal: 720 },
+        height: { ideal: 1280 },
+      },
+      audio: false,
+    });
+    try {
+      return await navigator.mediaDevices.getUserMedia(constraints(true));
+    } catch (e) {
+      return await navigator.mediaDevices.getUserMedia(constraints(false));
+    }
+  },
+
+  /**
+   * 根据当前摄像头朝向同步镜像状态（前置镜像，后置不镜像）
+   */
+  _applyMirror() {
+    this._mirrored = this.facingMode === 'user';
+    if (this.videoEl) {
+      this.videoEl.classList.toggle('mirrored', this._mirrored);
+    }
+  },
+
+  /**
+   * 运行中切换前后摄像头：先开新流、成功后再释放旧流，避免切换失败黑屏
+   */
+  async switchCamera() {
+    if (!this.landmarker) await this.init();
+    this.videoEl = document.getElementById('cameraVideo');
+    if (!this.videoEl) throw new Error('找不到视频元素');
+
+    const next = this.facingMode === 'user' ? 'environment' : 'user';
+    const btn = document.getElementById('btnFlipCamera');
+    if (btn) btn.disabled = true;
+    try {
+      const newStream = await this._getStream(next);
+
+      // 释放旧流
+      if (this.cameraStream) {
+        this.cameraStream.getTracks().forEach(t => t.stop());
+      }
+
+      this.cameraStream = newStream;
+      this.facingMode = next;
+      this.videoEl.srcObject = newStream;
+      await this.videoEl.play();
+      if (this.videoEl.readyState < 1) {
+        await new Promise(res => this.videoEl.addEventListener('loadedmetadata', res, { once: true }));
+      }
+      this._srcW = this.videoEl.videoWidth || this._srcW || 720;
+      this._srcH = this.videoEl.videoHeight || this._srcH || 1280;
+      this._applyMirror();
+      this._layoutViewport();
+
+      // 新流 currentTime 归零，重置帧标记，检测循环继续
+      this.lastVideoTime = -1;
+      if (!this.rafId) this._detectLoop();
+
+      return next;
+    } finally {
+      if (btn) btn.disabled = false;
+    }
   },
 
   /**
