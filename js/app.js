@@ -2,6 +2,25 @@
  * 主应用控制器
  * 负责导航、事件绑定、UI 更新、模块协调
  */
+
+/**
+ * 以 cover 方式（等比缩放、居中裁剪）把视频/图片绘制到目标画布
+ */
+function drawCover(ctx, source, srcW, srcH, dstW, dstH) {
+  if (!srcW || !srcH) { ctx.drawImage(source, 0, 0, dstW, dstH); return; }
+  const srcRatio = srcW / srcH;
+  const dstRatio = dstW / dstH;
+  let sw, sh;
+  if (srcRatio > dstRatio) {
+    sh = srcH;
+    sw = sh * dstRatio;
+  } else {
+    sw = srcW;
+    sh = sw / dstRatio;
+  }
+  ctx.drawImage(source, (srcW - sw) / 2, (srcH - sh) / 2, sw, sh, 0, 0, dstW, dstH);
+}
+
 const App = {
   settings: null,
   currentScreen: 'home',
@@ -74,6 +93,14 @@ const App = {
     // 停止摄像头（除非在训练或准备页）
     if (screenId !== 'train' && screenId !== 'prepare' && screenId !== 'modeling') {
       PoseDetection.stopCamera();
+    }
+
+    // 从建模页返回训练页时，把绘制目标恢复为骨架画布
+    if (screenId === 'train' && PoseDetection.cameraStream) {
+      PoseDetection.canvasEl = document.getElementById('skeleton');
+      PoseDetection.ctx = PoseDetection.canvasEl.getContext('2d');
+      PoseDetection._trainCanvas = PoseDetection.canvasEl;
+      PoseDetection._layoutViewport();
     }
   },
 
@@ -344,10 +371,18 @@ const App = {
 
     if (SafetyLayer.locked) return;
 
+    // 人体丢失时清除旧骨架，避免残留在实景上
+    if (!result.detected) {
+      PoseDetection.drawSkeleton(null);
+      StateMachine.updateMatch(0, false);
+      return;
+    }
+
     // 安全检查
     const safetyCheck = SafetyLayer.checkPoseResult(result);
     if (!safetyCheck.allow && safetyCheck.safe) {
       // 人体丢失等，不视为违规
+      PoseDetection.drawSkeleton(null);
       StateMachine.updateMatch(0, false);
       return;
     }
@@ -599,7 +634,10 @@ const App = {
     const video = document.getElementById('cameraVideo');
     const canvas = document.getElementById('modelCanvas');
     const ctx = canvas.getContext('2d');
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    canvas.width = 390;
+    canvas.height = 390;
+    // 与训练画面一致使用 cover 方式取帧，骨架才能对齐
+    drawCover(ctx, video, video.videoWidth || 720, video.videoHeight || 1280, 390, 390);
 
     // 创建 Image 对象用于检测
     const img = new Image();
@@ -611,11 +649,10 @@ const App = {
     const canvas = document.getElementById('modelCanvas');
     const ctx = canvas.getContext('2d');
 
-    // 绘制图片
-    const ratio = img.width / img.height;
+    // cover 方式绘制图片（等比缩放居中裁剪），与骨架映射保持一致
     canvas.width = 390;
     canvas.height = 390;
-    ctx.drawImage(img, 0, 0, 390, 390);
+    drawCover(ctx, img, img.width, img.height, 390, 390);
 
     // 检测姿态
     try {

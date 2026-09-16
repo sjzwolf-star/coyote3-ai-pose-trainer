@@ -14,6 +14,14 @@ const PoseDetection = {
   lastVideoTime: -1,
   results: null,
 
+  // 实景对齐相关
+  _trainCanvas: null,
+  _srcW: 0,
+  _srcH: 0,
+  _dpr: 1,
+  _mirrored: true,
+  _resizeHandler: null,
+
   // 回调
   onPoseResult: null,
 
@@ -112,10 +120,61 @@ const PoseDetection = {
     this.canvasEl = document.getElementById('skeleton');
     this.ctx = this.canvasEl.getContext('2d');
 
+    // 显示摄像头实景（CSS 中已做前置镜像）
+    this.videoEl.style.display = 'block';
+
+    // 等待拿到真实分辨率，避免骨架错位
+    if (this.videoEl.readyState < 1) {
+      await new Promise(res => this.videoEl.addEventListener('loadedmetadata', res, { once: true }));
+    }
+    this._srcW = this.videoEl.videoWidth || 720;
+    this._srcH = this.videoEl.videoHeight || 1280;
+
+    // canvas 内部分辨率按实际渲染尺寸 × DPR，保证清晰且与视频 cover 裁剪对齐
+    this._trainCanvas = this.canvasEl;
+    this._layoutViewport();
+    if (!this._resizeHandler) {
+      this._resizeHandler = () => this._layoutViewport();
+      window.addEventListener('resize', this._resizeHandler);
+      window.addEventListener('orientationchange', this._resizeHandler);
+    }
+
     // 开始检测循环
     this._detectLoop();
 
     return true;
+  },
+
+  /**
+   * 按容器实际尺寸设置 canvas 分辨率（与 video 的 object-fit:cover 使用同一显示区域）
+   */
+  _layoutViewport() {
+    if (!this.canvasEl || !this._srcW) return;
+    const rect = this.canvasEl.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return;
+    this._dpr = Math.min(window.devicePixelRatio || 1, 2);
+    this.canvasEl.width = Math.round(rect.width * this._dpr);
+    this.canvasEl.height = Math.round(rect.height * this._dpr);
+  },
+
+  /**
+   * 关键点坐标映射：MediaPipe 返回视频帧内的归一化坐标，
+   * 需按 cover 方式（等比缩放+居中裁剪）换算到 canvas；前置画面镜像时同步翻转
+   */
+  _mapPt(lm) {
+    const w = this.canvasEl.width;
+    const h = this.canvasEl.height;
+    // 源尺寸未知时退化为直接归一化映射
+    if (!this._srcW || !this._srcH) {
+      return { x: lm.x * w, y: lm.y * h };
+    }
+    const scale = Math.max(w / this._srcW, h / this._srcH);
+    const dw = this._srcW * scale;
+    const dh = this._srcH * scale;
+    let x = lm.x * dw - (dw - w) / 2;
+    let y = lm.y * dh - (dh - h) / 2;
+    if (this._mirrored && this.canvasEl === this._trainCanvas) x = w - x;
+    return { x, y };
   },
 
   stopCamera() {
@@ -129,9 +188,15 @@ const PoseDetection = {
     }
     if (this.videoEl) {
       this.videoEl.srcObject = null;
+      this.videoEl.style.display = 'none';
     }
-    // 清空画布
-    if (this.ctx) {
+    if (this._resizeHandler) {
+      window.removeEventListener('resize', this._resizeHandler);
+      window.removeEventListener('orientationchange', this._resizeHandler);
+      this._resizeHandler = null;
+    }
+    // 清空训练画布
+    if (this.ctx && this.canvasEl === this._trainCanvas) {
       this.ctx.clearRect(0, 0, this.canvasEl.width, this.canvasEl.height);
     }
   },
@@ -282,6 +347,10 @@ const PoseDetection = {
   async detectImage(imageElement) {
     if (!this.landmarker) await this.init();
 
+    // 记录源图尺寸，供 _mapPt 做与 drawImage(cover) 一致的映射
+    this._srcW = imageElement.naturalWidth || imageElement.videoWidth || imageElement.width;
+    this._srcH = imageElement.naturalHeight || imageElement.videoHeight || imageElement.height;
+
     // 确保是 IMAGE 模式
     if (this.runningMode !== 'IMAGE') {
       this.runningMode = 'IMAGE';
@@ -330,14 +399,19 @@ const PoseDetection = {
 
   _drawPose(landmarks, w, h, color, lineWidth, alpha, dashed) {
     const ctx = this.ctx;
+    // 按当前 canvas 实际像素/CSS 像素比缩放线宽（训练高清屏与建模画布通用）
+    const rect = this.canvasEl.getBoundingClientRect();
+    const dpr = rect.width ? this.canvasEl.width / rect.width : 1;
     ctx.save();
     ctx.globalAlpha = alpha;
     ctx.strokeStyle = color;
     ctx.fillStyle = color;
-    ctx.lineWidth = lineWidth;
+    ctx.lineWidth = lineWidth * dpr;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
 
     if (dashed) {
-      ctx.setLineDash([8, 6]);
+      ctx.setLineDash([8 * dpr, 6 * dpr]);
     } else {
       ctx.setLineDash([]);
     }
@@ -347,9 +421,11 @@ const PoseDetection = {
       const s = landmarks[start];
       const e = landmarks[end];
       if (s && e) {
+        const sp = this._mapPt(s);
+        const ep = this._mapPt(e);
         ctx.beginPath();
-        ctx.moveTo(s.x * w, s.y * h);
-        ctx.lineTo(e.x * w, e.y * h);
+        ctx.moveTo(sp.x, sp.y);
+        ctx.lineTo(ep.x, ep.y);
         ctx.stroke();
       }
     }
@@ -365,8 +441,9 @@ const PoseDetection = {
         if (!isMain && i !== 11 && i !== 12 && i !== 13 && i !== 14 && i !== 15 && i !== 16
             && i !== 23 && i !== 24 && i !== 25 && i !== 26 && i !== 27 && i !== 28) continue;
       }
+      const pt = this._mapPt(lm);
       ctx.beginPath();
-      ctx.arc(lm.x * w, lm.y * h, 5, 0, Math.PI * 2);
+      ctx.arc(pt.x, pt.y, 5 * dpr, 0, Math.PI * 2);
       ctx.fill();
     }
 
