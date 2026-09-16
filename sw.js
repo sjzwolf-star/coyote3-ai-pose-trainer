@@ -1,4 +1,4 @@
-const CACHE_NAME = 'coyote3-v1.0.0';
+const CACHE_NAME = 'coyote3-v1.1.0';
 const ASSETS = [
   './',
   './index.html',
@@ -11,6 +11,12 @@ const ASSETS = [
   './js/store.js',
   './js/audio.js',
   './js/app.js',
+  './lib/mediapipe/vision_bundle.mjs',
+  './lib/mediapipe/wasm/vision_wasm_internal.js',
+  './lib/mediapipe/wasm/vision_wasm_internal.wasm',
+  './lib/mediapipe/wasm/vision_wasm_nosimd_internal.js',
+  './lib/mediapipe/wasm/vision_wasm_nosimd_internal.wasm',
+  './lib/models/pose_landmarker_lite.task',
 ];
 
 self.addEventListener('install', (e) => {

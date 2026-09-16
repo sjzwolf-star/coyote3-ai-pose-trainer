@@ -51,19 +51,28 @@ const PoseDetection = {
   // ==================== 初始化 ====================
 
   async init() {
+    // 等待本地 MediaPipe 模块动态加载完成（最多20秒）
     if (typeof vision === 'undefined') {
-      throw new Error('MediaPipe Tasks Vision 库未加载，请检查网络连接。');
+      const start = Date.now();
+      while (typeof vision === 'undefined' && Date.now() - start < 20000) {
+        if (window.__visionError) {
+          throw new Error('MediaPipe 库加载失败: ' + window.__visionError);
+        }
+        await new Promise(r => setTimeout(r, 100));
+      }
+    }
+    if (typeof vision === 'undefined') {
+      throw new Error('MediaPipe Tasks Vision 库加载超时，请检查网络连接后刷新页面。');
     }
 
     const { PoseLandmarker, FilesetResolver } = vision;
 
-    const filesetResolver = await FilesetResolver.forVisionTasks(
-      'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
-    );
+    // 使用本地 wasm 与本地模型，国内网络无需访问外部 CDN
+    const filesetResolver = await FilesetResolver.forVisionTasks('lib/mediapipe/wasm');
 
     this.landmarker = await PoseLandmarker.createFromOptions(filesetResolver, {
       baseOptions: {
-        modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task',
+        modelAssetPath: 'lib/models/pose_landmarker_lite.task',
         delegate: 'CPU', // 手机端先用CPU，后续可改GPU
       },
       runningMode: 'IMAGE', // 初始模式，后续切换为VIDEO
