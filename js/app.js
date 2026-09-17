@@ -259,10 +259,10 @@ const App = {
       document.getElementById('trainThreshold').textContent = `目标匹配度 ≥ ${pose.threshold}%`;
     }
 
-    // 进入准备页
-    this.show('prepare');
+    // 直接进入训练页（跳过站姿校准）
+    this.show('train');
     await this._startCamera();
-    this._startChecks();
+    this._startTraining();
   },
 
   async _startCamera() {
