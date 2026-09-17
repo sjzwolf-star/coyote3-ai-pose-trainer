@@ -93,6 +93,13 @@ button:active{transform:scale(.97)}
 }
 .camflip:active{transform:scale(.9)}
 .camflip:disabled{opacity:.5}
+/* zoom 倍数徽标 */
+.zoombadge{
+  position:absolute;z-index:3;top:64px;right:60px;
+  background:rgba(3,13,21,.72);border:1px solid #31556c;
+  color:var(--cyan);font-size:12px;font-weight:700;
+  padding:6px 9px;border-radius:8px;pointer-events:none;
+}
 /* 实景上的轻微暗角，保证指标文字可读 */
 .camera:after{
   content:"";position:absolute;inset:0;z-index:1;pointer-events:none;

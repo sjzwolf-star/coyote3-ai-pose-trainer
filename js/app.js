@@ -148,6 +148,9 @@ const App = {
     // 前后摄像头切换
     document.getElementById('btnFlipCamera').onclick = () => this._flipCamera();
 
+    // 双指捏合控制 zoom（景深/焦距）
+    this._setupPinchZoom();
+
     // 设备连接
     document.getElementById('btnScanDevice').onclick = () => this._scanAndConnect();
     document.getElementById('btnDisconnect').onclick = () => CoyoteBLE.disconnect();
@@ -491,6 +494,54 @@ const App = {
       aBar.style.width = '0%';
       bBar.style.width = '0%';
     }, 500);
+  },
+
+  // ==================== 双指捏合 zoom ====================
+
+  _pinchState: { active: false, startDist: 0, startZoom: 1 },
+
+  _setupPinchZoom() {
+    const container = document.getElementById('cameraContainer');
+    if (!container) return;
+
+    // 阻止页面双指缩放，让手势专用于摄像头 zoom
+    const prevent = (e) => { if (e.touches.length === 2) e.preventDefault(); };
+    container.addEventListener('touchstart', prevent, { passive: false });
+    container.addEventListener('touchmove',  prevent, { passive: false });
+
+    container.addEventListener('touchstart', (e) => {
+      if (e.touches.length !== 2) return;
+      this._pinchState.active = true;
+      this._pinchState.startDist = this._twoFingerDistance(e.touches);
+      this._pinchState.startZoom = PoseDetection.zoom || 1;
+    }, { passive: true });
+
+    container.addEventListener('touchmove', (e) => {
+      if (!this._pinchState.active || e.touches.length !== 2) return;
+      const dist = this._twoFingerDistance(e.touches);
+      const ratio = dist / (this._pinchState.startDist || 1);
+      const nextZoom = this._pinchState.startZoom * ratio;
+      // 节流：直接调 setZoom 内部已做夹紧
+      PoseDetection.setZoom(nextZoom);
+    }, { passive: true });
+
+    const end = () => { this._pinchState.active = false; };
+    container.addEventListener('touchend', end);
+    container.addEventListener('touchcancel', end);
+
+    // 鼠标滚轮兜底（电脑测试）
+    container.addEventListener('wheel', (e) => {
+      if (!PoseDetection.cameraStream) return;
+      const delta = e.deltaY > 0 ? -0.1 : 0.1;
+      PoseDetection.setZoom(PoseDetection.zoom + delta);
+      e.preventDefault();
+    }, { passive: false });
+  },
+
+  _twoFingerDistance(touches) {
+    const dx = touches[0].clientX - touches[1].clientX;
+    const dy = touches[0].clientY - touches[1].clientY;
+    return Math.sqrt(dx * dx + dy * dy);
   },
 
   // ==================== 演示控制 ====================

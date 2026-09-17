@@ -23,6 +23,14 @@ const PoseDetection = {
   facingMode: 'user', // user=前置（镜像） environment=后置（不镜像）
   _resizeHandler: null,
 
+  // 缩放（景深/焦距）相关
+  zoom: 1,             // 当前 zoom 倍数（1=广角，>1=放大）
+  zoomMin: 1,
+  zoomMax: 4,          // 大多数手机硬件支持 1-4x
+  _track: null,        // MediaStreamTrack，用于 applyConstraints
+  _supportsZoomTrack: null,  // null=未知 true/false=已探测
+  _digitalScale: 1,    // 硬件不支持时的 CSS 数字放大倍数
+
   // 回调
   onPoseResult: null,
 
@@ -104,6 +112,10 @@ const PoseDetection = {
 
     this.cameraStream = await this._getStream(this.facingMode);
 
+    // 保存 track 引用供 zoom 控制
+    this._track = this.cameraStream.getVideoTracks()[0] || null;
+    this._supportsZoomTrack = null;  // 重置探测状态，新流重新探测
+
     this.videoEl.srcObject = this.cameraStream;
     await this.videoEl.play();
 
@@ -142,21 +154,101 @@ const PoseDetection = {
 
   /**
    * 申请指定朝向的摄像头；exact 失败时降级 ideal，兼容单摄像头设备
+   * 优先广角：高分辨率让传感器原生广角覆盖更多视野
    */
   async _getStream(mode) {
     const constraints = (exact) => ({
       video: {
         facingMode: exact ? { exact: mode } : mode,
-        width: { ideal: 720 },
-        height: { ideal: 1280 },
+        width:  { ideal: 1920 },   // 偏好高分辨率 → 更接近广角原生视野
+        height: { ideal: 1080 },
+        aspectRatio: { ideal: 16 / 9 },  // 广角常见比例
       },
       audio: false,
     });
     try {
       return await navigator.mediaDevices.getUserMedia(constraints(true));
     } catch (e) {
-      return await navigator.mediaDevices.getUserMedia(constraints(false));
+      try { return await navigator.mediaDevices.getUserMedia(constraints(false)); }
+      catch { // 再退一档较低分辨率
+        return await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: exact ? { exact: mode } : mode, width: { ideal: 720 }, height: { ideal: 1280 } },
+          audio: false,
+        });
+      }
     }
+  },
+
+  /**
+   * 探测当前 track 是否支持 zoom 约束；只测一次
+   */
+  _detectZoomSupport() {
+    if (this._supportsZoomTrack !== null) return;
+    if (!this._track || typeof this._track.getCapabilities !== 'function') {
+      this._supportsZoomTrack = false;
+      return;
+    }
+    try {
+      const caps = this._track.getCapabilities();
+      this._supportsZoomTrack = !!(caps && caps.zoom);
+      if (this._supportsZoomTrack) {
+        // 同步真实硬件上下限
+        if (caps.zoom.min != null) this.zoomMin = caps.zoom.min;
+        if (caps.zoom.max != null) this.zoomMax = Math.max(caps.zoom.max, this.zoomMax);
+      }
+    } catch { this._supportsZoomTrack = false; }
+  },
+
+  /**
+   * 设置 zoom 倍数（1=广角，>1=放大）；硬件不支持时用 CSS transform 数字放大作兜底
+   */
+  async setZoom(z) {
+    this.zoom = Math.max(this.zoomMin, Math.min(this.zoomMax, Number(z) || 1));
+    this._detectZoomSupport();
+
+    // 硬件 zoom
+    if (this._supportsZoomTrack && this._track) {
+      try {
+        await this._track.applyConstraints({ advanced: [{ zoom: this.zoom }] });
+        this._digitalScale = 1;  // 硬件生效，不需要 CSS 数字放大
+        this._applyDigitalScale();
+        this._notifyZoom();
+        return;
+      } catch (e) { /* 部分机型会拒绝；落到数字放大 */ }
+    }
+
+    // 数字放大兜底：用 CSS transform 把视频等比放大，骨架坐标已被 _mapPt 处理 cover 裁剪
+    // 需要同步给骨架画布也做相同的 scale + center 位移
+    this._digitalScale = this.zoom;
+    this._applyDigitalScale();
+    this._notifyZoom();
+  },
+
+  /**
+   * 把当前数字放大应用到 video 和 canvas 的 CSS transform
+   * （硬件 zoom 生效时 _digitalScale=1，等价于不做 CSS 放大）
+   */
+  _applyDigitalScale() {
+    if (!this.videoEl) return;
+    const s = this._digitalScale;
+    // 用 transform-origin 中心等比放大，镜像和缩放合并写
+    const mirror = this._mirrored ? 'scaleX(-1)' : 'scaleX(1)';
+    this.videoEl.style.transformOrigin = 'center center';
+    this.videoEl.style.transform = `${mirror} scale(${s})`;
+
+    // 骨架 canvas 同步等比放大（保持骨架与实景对齐）
+    if (this.canvasEl && this.canvasEl === this._trainCanvas) {
+      this.canvasEl.style.transformOrigin = 'center center';
+      // 骨架 canvas 默认无镜像，仅缩放
+      this.canvasEl.style.transform = `scale(${s})`;
+    }
+    // 更新 UI 徽标
+    const badge = document.getElementById('zoomBadge');
+    if (badge) badge.textContent = `${this.zoom.toFixed(1)}×`;
+  },
+
+  _notifyZoom() {
+    if (this.onZoomChange) this.onZoomChange(this.zoom);
   },
 
   /**
@@ -189,6 +281,11 @@ const PoseDetection = {
       }
 
       this.cameraStream = newStream;
+      this._track = newStream.getVideoTracks()[0] || null;
+      this._supportsZoomTrack = null;
+      // 切换前后摄时重置 zoom，新流默认广角
+      this.zoom = 1;
+      this._digitalScale = 1;
       this.facingMode = next;
       this.videoEl.srcObject = newStream;
       await this.videoEl.play();
@@ -198,6 +295,7 @@ const PoseDetection = {
       this._srcW = this.videoEl.videoWidth || this._srcW || 720;
       this._srcH = this.videoEl.videoHeight || this._srcH || 1280;
       this._applyMirror();
+      this._applyDigitalScale();
       this._layoutViewport();
 
       // 新流 currentTime 归零，重置帧标记，检测循环继续
@@ -254,7 +352,16 @@ const PoseDetection = {
     if (this.videoEl) {
       this.videoEl.srcObject = null;
       this.videoEl.style.display = 'none';
+      // 清空 zoom transform，避免下次启动残留
+      this.videoEl.style.transform = '';
     }
+    if (this.canvasEl && this.canvasEl === this._trainCanvas) {
+      this.canvasEl.style.transform = '';
+    }
+    this._track = null;
+    this._supportsZoomTrack = null;
+    this.zoom = 1;
+    this._digitalScale = 1;
     if (this._resizeHandler) {
       window.removeEventListener('resize', this._resizeHandler);
       window.removeEventListener('orientationchange', this._resizeHandler);
